@@ -85,19 +85,50 @@ public static class AnyDocConverter
     /// is <see cref="Ocr.Hosted"/>.
     /// </summary>
     /// <exception cref="HostedException">Firecrawl Parse could not convert the document.</exception>
-    public static async Task<string> ToMarkdownAsync(
+    public static Task<string> ToMarkdownAsync(
         ReadOnlyMemory<byte> data,
+        Format? format = null,
+        ConvertOptions? options = null,
+        CancellationToken cancellationToken = default) =>
+        ToMarkdownAsync(data, format, "document.pdf", options, cancellationToken);
+
+    /// <summary>
+    /// Read a document from a stream (an upload, a blob, a network response)
+    /// and convert it to Markdown. The read is asynchronous and honors
+    /// <paramref name="cancellationToken"/>; the conversion itself then runs
+    /// synchronously, as in <see cref="ToMarkdown(ReadOnlySpan{byte}, Format?)"/>.
+    /// Documents that need OCR go to Firecrawl Parse when
+    /// <see cref="ConvertOptions.Ocr"/> is <see cref="Ocr.Hosted"/>.
+    /// </summary>
+    /// <remarks>The stream is read to its end and not disposed.</remarks>
+    /// <exception cref="ConvertException">The document could not be converted.</exception>
+    /// <exception cref="HostedException">Firecrawl Parse could not convert the document.</exception>
+    public static async Task<string> ToMarkdownAsync(
+        Stream stream,
         Format? format = null,
         ConvertOptions? options = null,
         CancellationToken cancellationToken = default)
     {
+        var data = await ReadAllAsync(stream, cancellationToken).ConfigureAwait(false);
+        var filename = stream is FileStream file ? Path.GetFileName(file.Name) : "document.pdf";
+        return await ToMarkdownAsync(data, format, filename, options, cancellationToken).ConfigureAwait(false);
+    }
+
+    private static async Task<string> ToMarkdownAsync(
+        ReadOnlyMemory<byte> data,
+        Format? format,
+        string filename,
+        ConvertOptions? options,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
         try
         {
             return ToMarkdown(data.Span, format);
         }
         catch (NeedsOcrException) when (options?.Ocr == Ocr.Hosted)
         {
-            return await HostedOcr.ParseAsync(data, "document.pdf", options, cancellationToken)
+            return await HostedOcr.ParseAsync(data, filename, options, cancellationToken)
                 .ConfigureAwait(false);
         }
     }
@@ -114,6 +145,38 @@ public static class AnyDocConverter
     /// <exception cref="ConvertException">The document could not be parsed.</exception>
     public static Document ToDocument(ReadOnlySpan<byte> data, Format? format = null) =>
         Native.ToDocument(data, format);
+
+    /// <summary>
+    /// Read a document from a stream and parse it into the document model.
+    /// The read is asynchronous and honors <paramref name="cancellationToken"/>;
+    /// the parse itself then runs synchronously, as in
+    /// <see cref="ToDocument(ReadOnlySpan{byte}, Format?)"/>.
+    /// </summary>
+    /// <remarks>The stream is read to its end and not disposed.</remarks>
+    /// <exception cref="ConvertException">The document could not be parsed.</exception>
+    public static async Task<Document> ToDocumentAsync(
+        Stream stream, Format? format = null, CancellationToken cancellationToken = default)
+    {
+        var data = await ReadAllAsync(stream, cancellationToken).ConfigureAwait(false);
+        cancellationToken.ThrowIfCancellationRequested();
+        return ToDocument(data.Span, format);
+    }
+
+    /// <summary>The rest of the stream, without a copy when it is already a <see cref="MemoryStream"/>.</summary>
+    private static async Task<ReadOnlyMemory<byte>> ReadAllAsync(Stream stream, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(stream);
+        if (stream is MemoryStream memory && memory.TryGetBuffer(out var buffer))
+        {
+            var start = (int)Math.Min(memory.Position, buffer.Count);
+            memory.Position = memory.Length;
+            return buffer.AsMemory(start, buffer.Count - start);
+        }
+        var capacity = stream.CanSeek ? (int)Math.Min(stream.Length - stream.Position, int.MaxValue) : 0;
+        var copy = new MemoryStream(capacity);
+        await stream.CopyToAsync(copy, cancellationToken).ConfigureAwait(false);
+        return copy.GetBuffer().AsMemory(0, (int)copy.Length);
+    }
 
     /// <summary>
     /// Detect the format from the content itself: the signature each container

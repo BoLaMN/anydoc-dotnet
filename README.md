@@ -16,6 +16,11 @@ string fromCsv = AnyDocConverter.ToMarkdown(csvBytes, Format.Csv);
 string scanned = await AnyDocConverter.ToMarkdownAsync("scan.pdf",
     new ConvertOptions { Ocr = Ocr.Hosted });   // ApiKey, else FIRECRAWL_API_KEY, else keyless
 
+// From a stream (an upload, a blob): the read is async and cancellable,
+// the conversion itself is synchronous CPU work in the native library:
+await using var upload = file.OpenReadStream();
+string fromStream = await AnyDocConverter.ToMarkdownAsync(upload, cancellationToken: ct);
+
 // Or stop at the document model, which also carries embedded assets:
 Document document = AnyDocConverter.ToDocument(bytes);
 foreach (var block in document.Blocks)

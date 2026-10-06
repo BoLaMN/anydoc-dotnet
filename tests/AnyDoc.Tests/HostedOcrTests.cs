@@ -55,6 +55,19 @@ public class HostedOcrTests
     }
 
     [Fact]
+    public async Task FileStreamsSendTheirFileName()
+    {
+        var parse = new FakeParse(HttpStatusCode.OK, """{"success":true,"data":{"markdown":"ok"}}""");
+        var options = new ConvertOptions { Ocr = Ocr.Hosted, ApiKey = "", HttpClient = new HttpClient(parse) };
+        await using var stream = File.OpenRead(
+            Path.Combine(AppContext.BaseDirectory, "fixtures", "pdf", "handmade-scanned.pdf"));
+
+        await AnyDocConverter.ToMarkdownAsync(stream, options: options);
+
+        Assert.Contains("filename=handmade-scanned.pdf", parse.Body);
+    }
+
+    [Fact]
     public async Task KeylessSendsNoAuthorization()
     {
         var parse = new FakeParse(HttpStatusCode.OK, """{"success":true,"data":{"markdown":"ok\n"}}""");
