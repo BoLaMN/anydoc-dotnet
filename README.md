@@ -57,7 +57,9 @@ dotnet pack src/AnyDoc -c Release
 
 1. **native**: builds and tests the Rust library and the .NET binding on `linux-x64`, `linux-arm64`, `osx-x64`, `osx-arm64`, `win-x64` and `win-arm64`, each on its own runner.
 2. **pack**: gathers all six native libraries into one `AnyDoc.Net` package, checks that all six are inside, then installs it into a fresh console app and converts a PDF with it.
-3. **release** (tags only): pushing a tag such as `v0.2.5` creates a GitHub Release with the `.nupkg` and a zip of each platform's native library. Tags with a suffix (`v0.3.0-beta.1`) are marked as prereleases. If the repository has a `NUGET_API_KEY` secret, the package is also pushed to nuget.org.
+3. **release** (tags only): pushing a tag such as `v0.2.5` creates a GitHub Release with the `.nupkg` and a zip of each platform's native library. Tags with a suffix (`v0.3.0-beta.1`) are marked as prereleases. The package is then pushed to nuget.org by [trusted publishing](https://learn.microsoft.com/nuget/nuget-org/trusted-publishing), with no stored API key, when the repository variable `NUGET_USER` is set.
+
+Trusted publishing setup (once): on nuget.org, add a Trusted Publishing policy (owner `BoLaMN`, repository `anydoc-dotnet`, workflow file `ci.yml`), then set `NUGET_USER` to your nuget.org profile name: `gh variable set NUGET_USER --body <name>`. To push a release that already exists on GitHub (a retry, or one made before the policy existed), run the workflow manually with `publish_tag`: `gh workflow run ci.yml -f publish_tag=v0.2.4`.
 
 ```bash
 git tag v0.2.5 && git push origin v0.2.5

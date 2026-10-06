@@ -3,7 +3,8 @@ name: CI
 # Every push and pull request builds the native library on each platform,
 # tests it there, and packs one NuGet package carrying all of them. A tag
 # `v*` (e.g. v0.2.4) also publishes a GitHub Release with the package and
-# the native libraries, and pushes to nuget.org when NUGET_API_KEY is set.
+# the native libraries, and pushes to nuget.org by trusted publishing when
+# the NUGET_USER repository variable is set.
 
 on:
   push:
@@ -11,6 +12,11 @@ on:
     tags: ["v*"]
   pull_request:
   workflow_dispatch:
+    inputs:
+      publish_tag:
+        description: "Push an existing GitHub Release's .nupkg to nuget.org (e.g. v0.2.4); leave empty for a normal build"
+        required: false
+        default: ""
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -28,6 +34,7 @@ env:
 jobs:
   native:
     name: ${{ matrix.rid }}
+    if: github.event_name != 'workflow_dispatch' || inputs.publish_tag == ''
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -151,6 +158,7 @@ jobs:
     runs-on: ubuntu-22.04
     permissions:
       contents: write
+      id-token: write  # OIDC token for nuget.org trusted publishing
     steps:
       - uses: actions/setup-dotnet@v4
         with:
@@ -179,12 +187,49 @@ jobs:
           [[ "$GITHUB_REF_NAME" == *-* ]] && flags+=(--prerelease)
           gh release create "$GITHUB_REF_NAME" dist/* "${flags[@]}"
 
+      # Trusted publishing: nuget.org trades GitHub's OIDC token for a
+      # one-hour API key, so no long-lived key is stored. Needs a policy on
+      # nuget.org (owner BoLaMN, repository anydoc-dotnet, workflow ci.yml)
+      # and the repository variable NUGET_USER (the nuget.org profile name).
+      - name: NuGet login (OIDC → temporary API key)
+        if: vars.NUGET_USER != ''
+        id: nuget
+        uses: NuGet/login@v1
+        with:
+          user: ${{ vars.NUGET_USER }}
+
+      - name: Push to nuget.org
+        if: vars.NUGET_USER != ''
+        env:
+          NUGET_API_KEY: ${{ steps.nuget.outputs.NUGET_API_KEY }}
+        run: dotnet nuget push dist/*.nupkg --api-key "$NUGET_API_KEY" --source https://api.nuget.org/v3/index.json --skip-duplicate
+
+  # Manual retry or late publish: push a release that already exists on
+  # GitHub to nuget.org, through the same trusted publishing policy.
+  publish-existing:
+    if: github.event_name == 'workflow_dispatch' && inputs.publish_tag != ''
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+      id-token: write  # OIDC token for nuget.org trusted publishing
+    steps:
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Download the release's package
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.publish_tag }}
+        run: gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern "*.nupkg" --dir dist
+
+      - name: NuGet login (OIDC → temporary API key)
+        id: nuget
+        uses: NuGet/login@v1
+        with:
+          user: ${{ vars.NUGET_USER }}
+
       - name: Push to nuget.org
         env:
-          NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
-        run: |
-          if [[ -z "$NUGET_API_KEY" ]]; then
-            echo "NUGET_API_KEY is not set; skipping nuget.org."
-            exit 0
-          fi
-          dotnet nuget push dist/*.nupkg --api-key "$NUGET_API_KEY" --source https://api.nuget.org/v3/index.json --skip-duplicate
+          NUGET_API_KEY: ${{ steps.nuget.outputs.NUGET_API_KEY }}
+        run: dotnet nuget push dist/*.nupkg --api-key "$NUGET_API_KEY" --source https://api.nuget.org/v3/index.json --skip-duplicate
