@@ -1,0 +1,4 @@
+# Fixtures and snapshots are compared byte for byte: no line-ending
+# conversion on Windows checkouts.
+tests/AnyDoc.Tests/fixtures/** binary
+*.sh text eol=lf

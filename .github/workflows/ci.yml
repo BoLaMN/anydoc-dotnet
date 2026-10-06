@@ -1,0 +1,190 @@
+name: CI
+
+# Every push and pull request builds the native library on each platform,
+# tests it there, and packs one NuGet package carrying all of them. A tag
+# `v*` (e.g. v0.2.4) also publishes a GitHub Release with the package and
+# the native libraries, and pushes to nuget.org when NUGET_API_KEY is set.
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  CARGO_TERM_COLOR: always
+  DOTNET_NOLOGO: true
+  DOTNET_CLI_TELEMETRY_OPTOUT: true
+
+jobs:
+  native:
+    name: ${{ matrix.rid }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Linux builds on 22.04 so the library loads on glibc 2.35 and up.
+          - { rid: linux-x64,   os: ubuntu-22.04,     target: x86_64-unknown-linux-gnu,  lib: libanydoc_ffi.so }
+          - { rid: linux-arm64, os: ubuntu-22.04-arm, target: aarch64-unknown-linux-gnu, lib: libanydoc_ffi.so }
+          - { rid: osx-x64,     os: macos-15-intel,   target: x86_64-apple-darwin,       lib: libanydoc_ffi.dylib }
+          - { rid: osx-arm64,   os: macos-15,         target: aarch64-apple-darwin,      lib: libanydoc_ffi.dylib }
+          - { rid: win-x64,     os: windows-2022,     target: x86_64-pc-windows-msvc,    lib: anydoc_ffi.dll }
+          - { rid: win-arm64,   os: windows-11-arm,   target: aarch64-pc-windows-msvc,   lib: anydoc_ffi.dll }
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: native
+          key: ${{ matrix.target }}
+
+      - name: Test native library
+        run: cargo test --release --locked --manifest-path native/Cargo.toml --target ${{ matrix.target }}
+
+      - name: Build native library
+        run: cargo build --release --locked --manifest-path native/Cargo.toml --target ${{ matrix.target }}
+
+      - name: Stage native library
+        run: |
+          mkdir -p "src/AnyDoc/runtimes/${{ matrix.rid }}/native"
+          cp "native/target/${{ matrix.target }}/release/${{ matrix.lib }}" "src/AnyDoc/runtimes/${{ matrix.rid }}/native/"
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            8.0.x
+            10.0.x
+
+      - name: Test .NET binding
+        run: dotnet test tests/AnyDoc.Tests -c Release
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: native-${{ matrix.rid }}
+          path: src/AnyDoc/runtimes/${{ matrix.rid }}/native/${{ matrix.lib }}
+          if-no-files-found: error
+
+  pack:
+    needs: native
+    runs-on: ubuntu-22.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            8.0.x
+            10.0.x
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: native-*
+          path: artifacts
+
+      - name: Stage every platform's native library
+        run: |
+          for dir in artifacts/native-*; do
+            rid="${dir#artifacts/native-}"
+            mkdir -p "src/AnyDoc/runtimes/$rid/native"
+            cp "$dir"/* "src/AnyDoc/runtimes/$rid/native/"
+          done
+          find src/AnyDoc/runtimes -type f | sort
+
+      - name: Version
+        id: version
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            version="${GITHUB_REF_NAME#v}"
+          else
+            base=$(sed -n 's:.*<Version>\(.*\)</Version>.*:\1:p' src/AnyDoc/AnyDoc.csproj)
+            version="$base-ci.${{ github.run_number }}"
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Packing $version"
+
+      - name: Pack
+        run: dotnet pack src/AnyDoc -c Release -p:Version=${{ steps.version.outputs.version }} -o dist
+
+      - name: Check the package carries every platform
+        run: |
+          libs=$(unzip -l dist/*.nupkg | grep -c 'runtimes/.*/native/')
+          unzip -l dist/*.nupkg | grep 'runtimes/'
+          [[ "$libs" == 6 ]] || { echo "expected 6 native libraries, found $libs"; exit 1; }
+
+      # Consume the package the way users do (NuGet's runtimes/ resolution,
+      # not the project reference the tests use).
+      - name: Smoke-test the package
+        run: |
+          mkdir smoke && cd smoke
+          dotnet new console --framework net8.0
+          dotnet add package AnyDoc.Net --version ${{ steps.version.outputs.version }} --source ../dist
+          echo 'Console.Write(AnyDoc.AnyDocConverter.ToMarkdown(args[0]));' > Program.cs
+          out=$(dotnet run -- ../tests/AnyDoc.Tests/fixtures/pdf/form-xobject-indirect-resources.pdf)
+          echo "$out"
+          [[ "$out" == *"Triple Garage"* ]]
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nupkg
+          path: dist/*.nupkg
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: pack
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Assemble release files
+        run: |
+          mkdir dist
+          cp artifacts/nupkg/*.nupkg dist/
+          for dir in artifacts/native-*; do
+            rid="${dir#artifacts/native-}"
+            (cd "$dir" && zip -q "$GITHUB_WORKSPACE/dist/anydoc_ffi-${GITHUB_REF_NAME}-$rid.zip" ./*)
+          done
+          ls -la dist
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          flags=(--repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --generate-notes)
+          # A tag with a suffix (v0.3.0-beta.1) is a prerelease.
+          [[ "$GITHUB_REF_NAME" == *-* ]] && flags+=(--prerelease)
+          gh release create "$GITHUB_REF_NAME" dist/* "${flags[@]}"
+
+      - name: Push to nuget.org
+        env:
+          NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
+        run: |
+          if [[ -z "$NUGET_API_KEY" ]]; then
+            echo "NUGET_API_KEY is not set; skipping nuget.org."
+            exit 0
+          fi
+          dotnet nuget push dist/*.nupkg --api-key "$NUGET_API_KEY" --source https://api.nuget.org/v3/index.json --skip-duplicate

@@ -1,0 +1,6 @@
+bin/
+obj/
+native/target/
+src/AnyDoc/runtimes/
+*.nupkg
+.DS_Store

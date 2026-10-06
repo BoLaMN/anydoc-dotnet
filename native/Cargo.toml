@@ -1,0 +1,26 @@
+[package]
+name = "anydoc-ffi"
+version = "0.2.4"
+edition = "2024"
+description = "C ABI over anydoc, consumed by the .NET binding"
+license = "MIT"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+anydoc = "0.2.4"
+base64 = "0.22"
+serde_json = { version = "1", features = ["preserve_order"] }
+
+# The PDF backend, with the fix for fonts inside Form XObjects whose
+# /Resources is an indirect reference (PDFsharp-imported pages read as
+# shifted gibberish without it). Drop this once firecrawl/pdf-inspector
+# releases the fix.
+[patch.crates-io]
+pdf-inspector = { git = "https://github.com/BoLaMN/pdf-inspector", rev = "3c809e6cd2e0dac1cbea20550157364438a13f06" }
+
+[profile.release]
+lto = "thin"
+strip = "symbols"
