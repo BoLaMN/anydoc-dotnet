@@ -21,6 +21,11 @@ string scanned = await AnyDocConverter.ToMarkdownAsync("scan.pdf",
 await using var upload = file.OpenReadStream();
 string fromStream = await AnyDocConverter.ToMarkdownAsync(upload, cancellationToken: ct);
 
+// In a server, keep that CPU work off request threads yourself. The token
+// only stops a conversion that has not started; cap concurrency with your
+// own queue or limiter (a SemaphoreSlim, a Channel and a hosted service).
+string offloaded = await Task.Run(() => AnyDocConverter.ToMarkdown(bytes), ct);
+
 // Or stop at the document model, which also carries embedded assets:
 Document document = AnyDocConverter.ToDocument(bytes);
 foreach (var block in document.Blocks)
